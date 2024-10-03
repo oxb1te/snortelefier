@@ -1,0 +1,104 @@
+#!/bin/bash
+
+###
+# Snortelefier (Snort Telegram Notifier - Огоҳидиҳандаи телеграммии Snort): 
+#   Барномаи скриптии соддаи bash барои фиристодани огоҳиномаҳои Snort тавассути 
+#   Telegram Bot ба корбар, агар файлҳои логии Snort вуҷуд дошта бошанд.
+# Репозитория: 
+#   https://github.com/oxb1te/snortelefier
+# Муаллиф: 
+#   oxbyte (https://github.com/oxb1te)
+# Рад кунии масъулият (Disclaimer):
+#   Snortelefier "ҳамон тавре, ки ҳаст" пешниҳод шудааст. Муаллиф барои зарар ё 
+#   талафот ҷавобгар нест. Ин барномаи скриптиро масъулона истифода баред! Назорати 
+#   ғайрирасмӣ, маълумотро хориҷ кардан (data exfitration) ё дигар кибер-ҳамлаҳои, ки
+#   ин барномаи скрипти метавонад кӯмак расонад, метавонад қонунҳо ва қоидаҳоро вайрон
+#   кунад. Пеш аз истифода, барои мувофиқат бо стандартҳои ҳуқуқии дахлдор боварӣ ҳосил кунед!
+###
+
+# - Бор кардани тағйирот -
+if [[ -f .env ]]; then
+    # shellcheck disable=SC1091
+    source .env 
+    if [[ -z "${CHAT_ID}" ]] && [[ -z "${TOKEN}" ]]; then
+        printf "[x] - CHAT_ID ё TOKEN дар файли .env ефта нашуд\n" >&2 && exit 1
+    fi
+else
+    printf "[x] - Файли .env дар %s ефта нашуд\n" "$PWD" >&2
+    exit 1
+fi
+
+# - Функсия барои фиристодани огоҳинома тавассути Telegram - 
+send_alert() {
+    local CAPTION="$1"
+    local CURRENT_TIME; CURRENT_TIME=$(date +%s)
+    
+    # - Маҳдудияти огоҳинома -
+    if [[ $CURRENT_TIME -lt $BLOCK_UNTIL ]]; then
+        printf "Огоҳинома манъ карда шудааст то: %s\n" "$(date -d @"$BLOCK_UNTIL" +"%d %b %Y %T")" >&2
+        return 1
+    fi
+
+    if (( CURRENT_TIME - LAST_ALERT_TIME > RATE_WINDOW )); then
+        ALERT_COUNT=0
+    fi
+
+    if (( ALERT_COUNT >= RATE_LIMIT )); then
+        BLOCK_UNTIL=$((CURRENT_TIME + BLOCK_DURATION))
+        printf "[*] - Шумо ба ҳадди огоҳинома расидед. Манъ то: %s\n" "$(date -d @$BLOCK_UNTIL +"%d %b %Y %T")" >&2
+        return 1
+    fi
+
+    if ! curl -s -F chat_id="$CHAT_ID" -F text="$CAPTION" https://api.telegram.org/bot"$TOKEN"/sendMessage > /dev/null 2>&1; then
+        printf "[x] - Наметавонам огоҳинома фиристам %s\n" "$(date +"%d %b %Y %T")" >&2
+        return 1
+    fi
+    
+    ALERT_COUNT=$((ALERT_COUNT + 1))
+    LAST_ALERT_TIME=$CURRENT_TIME
+    printf "[+] - Огоҳинома бомуваффақият фиристода шуд %s\n" "$(date +"%d %b %Y %T")"
+    return 0
+}
+
+# - Создани паёми огоҳинома -
+build_message() {
+    local MSG_CONTENT
+    MSG_CONTENT=$(tail -n 2 "$SNORT_LOG_FILE" 2>/dev/null) || { printf "[x] - Ҳеҷ вуруди нав дар лог вуҷуд надорад\n" >&2; return 1; }
+    {
+    printf "Салом %s!\n" "$USER"
+    printf "Фаъолияти шубҳаноки шабака дар сервер ошкор шуд!\n\n" 
+    printf "Вақти сервер: %s\n\n%s\n" "$(date +"%d %b %Y %T")" "$MSG_CONTENT" 
+    } >> "$MSG_CAPTION"
+    
+    local CAPTION
+    CAPTION=$(<"$MSG_CAPTION")
+    
+    if [[ -z $CAPTION ]]; then
+        printf "[x] - Наметавонам паёмро эҷод кунам\n" >&2
+        return 1
+    fi
+
+    send_alert "$CAPTION" && rm -f "$MSG_CAPTION"
+}
+
+# - Истифодаи inotifywait барои назорати самараноки файл аз ба ҷои санҷидани дафъаи дастӣ -
+monitor_snort_log_file() {
+    while inotifywait -q -e modify "$SNORT_LOG_FILE"; do
+        printf " [+] - Тағйири лог мушоҳида шуд. Фиристодани огоҳинома...\n"
+        build_message
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+# - Функсияи асосӣ -
+main() {
+    if [[ ! -f "$SNORT_LOG_FILE" ]]; then
+        printf " [*] - Лог файл вуҷуд надорад: %s\n" "$SNORT_LOG_FILE" >&2
+        return 1
+    fi
+
+    printf " [+] - Назорат кардани логҳои Snort оғоз шуд... %s\n" "$(date +"%d %b %Y %T")"
+    monitor_snort_log_file
+}
+
+main

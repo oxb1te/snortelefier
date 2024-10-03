@@ -1,0 +1,103 @@
+#!/bin/bash
+
+###
+# Snortelefier (Snort Telegram Notifier): 
+#   Simple bash script for sending Snort alerts via Telegram Bot to the user if there are any Snort log files.
+# Repository:
+#   https://github.com/oxb1te/snortelefier
+# Author:
+#    oxbyte (https://github.com/oxb1te)
+# Disclaimer:
+#   Snortelefier is provided "as is." The author is not liable for any damages or losses.
+#   Use this script responsibly! Unauthorized monitoring, exfiltration of data, or 
+#   other cyber attacks that this script can assist with may violate laws and regulations.
+#   Ensure compliance with applicable legal standards before use!
+###
+
+# - Load variables -
+if [[ -f .env ]]; then
+    # shellcheck disable=SC1091
+    source .env
+    if [[ -z "${CHAT_ID}" ]] && [[ -z "${TOKEN}" ]]; then
+        printf "[x] - CHAT_ID or TOKEN not found in the .env file\n" >&2 && exit 1
+    fi
+else
+    printf "[x] - The .env file not found in %s\n" "$PWD" >&2
+    exit 1
+fi
+
+# - Function to send alert via Telegram - 
+send_alert() {
+    local CAPTION="$1"
+    local CURRENT_TIME; CURRENT_TIME=$(date +%s)
+    
+    # - Rate limiting -
+    if [[ $CURRENT_TIME -lt $BLOCK_UNTIL ]]; then
+        printf " [*] Alert is blocked until: %s\n" "$(date -d @"$BLOCK_UNTIL" +"%d %b %Y %T")" >&2
+        return 1
+    fi
+
+    if (( CURRENT_TIME - LAST_ALERT_TIME > RATE_WINDOW )); then
+        ALERT_COUNT=0
+    fi
+
+    if (( ALERT_COUNT >= RATE_LIMIT )); then
+        BLOCK_UNTIL=$((CURRENT_TIME + BLOCK_DURATION))
+        printf " [*] - You have reached the alert limit. Blocked until: %s\n" "$(date -d @$BLOCK_UNTIL +"%d %b %Y %T")" >&2
+        return 1
+    fi
+
+    if ! curl -s -F chat_id="$CHAT_ID" -F text="$CAPTION" https://api.telegram.org/bot"$TOKEN"/sendMessage > /dev/null 2>&1; then
+        printf " [x] - Unable to send alert %s\n" "$(date +"%d %b %Y %T")" >&2
+        return 1
+    fi
+    
+    ALERT_COUNT=$((ALERT_COUNT + 1))
+    LAST_ALERT_TIME=$CURRENT_TIME
+    printf " [+] - Alert successfully sent %s\n" "$(date +"%d %b %Y %T")"
+    return 0
+}
+
+# - Build the alert message -
+build_message() {
+    local MSG_CONTENT
+    local CAPTION
+
+    MSG_CONTENT=$(tail -n 2 "$SNORT_LOG_FILE" 2>/dev/null) || { printf " [x] - No new entries in the log\n" >&2; return 1; }
+    {
+        printf "[!] - Hello %s!\n" "$USER" > "$MSG_CAPTION"
+        printf "[!] - Suspicious network activity has been detected on the server!\n\n" 
+        printf "[*] - Server time: %s\n\n%s\n" "$(date +"%d %b %Y %T")" "$MSG_CONTENT"
+    } >> "$MSG_CAPTION"
+    
+    CAPTION=$(<"$MSG_CAPTION")
+
+    if [[ -z $CAPTION ]]; then
+        printf " [x] - Unable to create message\n" >&2
+        return 1
+    fi
+
+    send_alert "$CAPTION" && rm -f "$MSG_CAPTION"
+}
+
+# - Use inotifywait for efficient file monitoring instead of manual size checking -
+monitor_snort_log_file() {
+    while inotifywait -q -e modify "$SNORT_LOG_FILE"; do
+        printf " [+] - Log change detected. Sending alert...\n"
+        build_message
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+# - Main function -
+main() {
+    if [[ ! -f "$SNORT_LOG_FILE" ]]; then
+        printf " [*] - Log file does not exist: %s\n" "$SNORT_LOG_FILE" >&2
+        return 1
+    fi
+
+    printf " [+] - Monitoring Snort logs started... %s\n" "$(date +"%d %b %Y %T")"
+    monitor_snort_log_file
+}
+
+main
